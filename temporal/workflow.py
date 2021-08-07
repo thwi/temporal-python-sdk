@@ -7,7 +7,7 @@ import uuid
 from asyncio import Future
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Callable, List, Type, Dict, Tuple, Any, TypeVar
+from typing import Callable, List, Type, Dict, Tuple, Any, TypeVar, Union
 from uuid import uuid4
 
 from .activity_method import RetryParameters, ActivityOptions
@@ -17,7 +17,8 @@ from .api.history.v1 import WorkflowExecutionTerminatedEventAttributes
 from .api.query.v1 import WorkflowQuery
 from .api.taskqueue.v1 import TaskQueue
 from .api.workflowservice.v1 import StartWorkflowExecutionRequest, GetWorkflowExecutionHistoryRequest, \
-    QueryWorkflowRequest, QueryWorkflowResponse, SignalWorkflowExecutionRequest, WorkflowServiceStub
+    QueryWorkflowRequest, QueryWorkflowResponse, SignalWorkflowExecutionRequest, WorkflowServiceStub, \
+    SignalWithStartWorkflowExecutionRequest
 
 from .constants import DEFAULT_SOCKET_TIMEOUT_SECONDS
 from .converter import DataConverter, DEFAULT_DATA_CONVERTER_INSTANCE, get_fn_ret_type_hints, get_fn_args_type_hints
@@ -169,6 +170,7 @@ class WorkflowClient:
         method = stub_fn._workflow_method  # type: ignore
         assert method is not None
         options = stub._workflow_options  # type: ignore
+
         return await exec_workflow(client, method, args,
                              workflow_options=options, stub_instance=stub)
 
@@ -262,10 +264,31 @@ class WorkflowClient:
         self.service.channel.close()
 
 
+def parse_signal_method_argument(args: list):
+    """Iterates over arguments in search of a signal method. If a signal method is found, the first signal method is
+    extracted, arguments prior to the signal method are considered workflow input, and arguments following the signal
+    method are considered signal input."""
+    sm = None
+    sm_args = None
+
+    for i, arg in enumerate(args):
+        if not hasattr(arg, '_signal_method'):
+            continue
+        sm = getattr(arg, '_signal_method')
+        sm_args = list(args[i+1:])
+        args = list(args[:i])
+        break
+
+    return args, sm, sm_args
+
+
 async def exec_workflow(workflow_client: WorkflowClient, wm: WorkflowMethod, args, workflow_options: WorkflowOptions = None,
                   stub_instance: object = None) -> WorkflowExecutionContext:
-    start_request = create_start_workflow_request(workflow_client, wm, args, workflow_options)
-    start_response = await workflow_client.service.start_workflow_execution(request=start_request)
+    args, sm, sm_args = parse_signal_method_argument(args)
+    start_request = create_start_workflow_request(workflow_client, wm, args, workflow_options, sm, sm_args)
+    start_method_str = "signal_with_start_workflow_execution" if sm is not None else "start_workflow_execution"
+    start_method = getattr(workflow_client.service, start_method_str)
+    start_response = await start_method(request=start_request)
     execution = WorkflowExecution(workflow_id=start_request.workflow_id, run_id=start_response.run_id)
     stub_instance._execution = execution  # type: ignore
     return WorkflowExecutionContext(workflow_type=wm._name, workflow_execution=execution, workflow_method_instance=wm)
@@ -328,9 +351,18 @@ def create_search_attributes(s: Dict[str, object], data_converter: DataConverter
     return search_attributes
 
 
-def create_start_workflow_request(workflow_client: WorkflowClient, wm: WorkflowMethod,
-                                  args: List, workflow_options: WorkflowOptions = None) -> StartWorkflowExecutionRequest:
-    start_request = StartWorkflowExecutionRequest()
+def create_start_workflow_request(workflow_client: WorkflowClient, wm: WorkflowMethod, args: List,
+                                 workflow_options: WorkflowOptions = None, sm: SignalMethod = None,
+                                 sm_args: list = None
+                                 ) -> Union[StartWorkflowExecutionRequest, SignalWithStartWorkflowExecutionRequest]:
+
+    if sm is not None:
+        start_request = SignalWithStartWorkflowExecutionRequest()
+        start_request.signal_name = sm.name
+        start_request.signal_input = workflow_client.data_converter.to_payloads(sm_args)
+    else:
+        start_request = StartWorkflowExecutionRequest()
+
     start_request.namespace = workflow_client.namespace
     start_request.workflow_id = wm._workflow_id if wm._workflow_id else str(uuid4())
     start_request.workflow_type = WorkflowType()
