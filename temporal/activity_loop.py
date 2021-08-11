@@ -5,6 +5,7 @@ import inspect
 from typing import List
 
 from grpclib import GRPCError
+from grpclib.exceptions import StreamTerminatedError
 
 from temporal.activity import ActivityContext, ActivityTask, complete_exceptionally, complete
 from temporal.api.taskqueue.v1 import TaskQueue, TaskQueueMetadata
@@ -41,6 +42,9 @@ async def activity_task_loop_func(worker: Worker):
                 logger.debug("PollActivityTaskQueue: %dms", (polling_end - polling_start).total_seconds() * 1000)
             except StopRequestedException:
                 return
+            except StreamTerminatedError:
+                logger.debug("GRPC stream terminated -- reinvoking poll")
+                continue
             except GRPCError as ex:
                 logger.error("Error invoking poll_activity_task_queue: %s", ex, exc_info=True)
                 continue
