@@ -22,6 +22,7 @@ from time import mktime
 from typing import List, Dict, Optional, Any, Callable
 
 from grpclib import GRPCError
+from grpclib.exceptions import StreamTerminatedError
 from more_itertools import peekable  # type: ignore
 
 from .activity_method import ExecuteActivityParameters
@@ -932,6 +933,9 @@ class DecisionTaskLoop:
                     # self.service.set_next_timeout_cb(self.worker.raise_if_stop_requested)
                     try:
                         decision_task: PollWorkflowTaskQueueResponse = await self.poll()
+                    except StreamTerminatedError:
+                        logger.debug("GRPC stream terminated -- reinvoking poll")
+                        continue
                     except GRPCError as ex:
                         logger.error("poll_workflow_task_queue failed: %s", ex, exc_info=True)
                         continue
